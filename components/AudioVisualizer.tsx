@@ -8,14 +8,10 @@ interface AudioVisualizerProps {
 const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ isActive, volume }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const requestRef = useRef<number>(0);
-  const phaseRef = useRef<number>(0);
   
-  // Use a ref to hold the latest volume to decouple animation loop from render cycle
-  const volumeRef = useRef(volume);
-
-  useEffect(() => {
-    volumeRef.current = volume;
-  }, [volume]);
+  // State for the 4 bars
+  // We store current height to interpolate smoothly
+  const barsRef = useRef<number[]>([0.2, 0.2, 0.2, 0.2]); 
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -25,71 +21,79 @@ const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ isActive, volume }) =
     if (!ctx) return;
 
     const animate = () => {
-      // Update dimensions
       const { width, height } = canvas;
-      // Clear canvas
       ctx.clearRect(0, 0, width, height);
-      
-      // Base configuration
-      const centerY = height / 2;
-      const baseAmplitude = height * 0.05; // Subtle breathing when idle
-      // Interpolate volume for smoothness (optional, but good for jitter)
-      // Here we just use the raw ref for responsiveness
-      const activeAmplitude = height * 0.4 * volumeRef.current; 
-      
-      const amplitude = isActive ? baseAmplitude + activeAmplitude : 2; // Flat-ish line when inactive
-      
-      // Increment phase for movement
-      phaseRef.current += 0.15; // Speed of the wave
-      
-      // Colors (Gemini Blue, Red, Yellow, Green)
-      const colors = ['#4285F4', '#EA4335', '#FBBC05', '#34A853'];
-      
-      // Draw 4 overlapping sine waves
-      colors.forEach((color, i) => {
-        ctx.beginPath();
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 3;
-        // Opacity based on activity
-        ctx.globalAlpha = isActive ? 0.8 : 0.3;
 
-        for (let x = 0; x <= width; x+=5) {
-          // Varies frequency slightly for each line
-          const frequency = 0.01 + (i * 0.002); 
-          // Phase offset for each line so they don't overlap perfectly
-          const phaseOffset = i * 2; 
+      // Config for the 4 bars
+      const barCount = 4;
+      const spacing = 12; // Space between bars
+      const totalWidth = width * 0.6; // Occupy 60% of width
+      const barWidth = (totalWidth - (spacing * (barCount - 1))) / barCount;
+      const startX = (width - totalWidth) / 2;
+      const centerY = height / 2;
+      const maxBarHeight = height * 0.8;
+      const minBarHeight = barWidth; // Make them circular when small
+
+      // Animation logic
+      const time = Date.now() / 1000;
+      
+      barsRef.current = barsRef.current.map((prevHeight, i) => {
+        let targetHeight = 0.2; // Default idle height
+
+        if (isActive) {
+          // Create a wave-like effect across the 4 bars using sine + volume
+          const noise = Math.sin(time * 5 + i); 
+          // Base volume effect
+          const volumeEffect = Math.max(0.1, volume * 2.5); 
           
-          // Calculate Y
-          const y = centerY + Math.sin(x * frequency + phaseRef.current + phaseOffset) * amplitude * Math.sin(x / width * Math.PI); // Windowing function to pin edges
+          // The center bars usually react more in voice assistants
+          const positionBias = (i === 1 || i === 2) ? 1.2 : 0.8;
           
-          if (x === 0) ctx.moveTo(x, y);
-          else ctx.lineTo(x, y);
+          targetHeight = Math.min(1, volumeEffect * positionBias + (noise * 0.1));
         }
-        ctx.stroke();
+
+        // Smooth lerp
+        return prevHeight + (targetHeight - prevHeight) * 0.15;
+      });
+
+      // Draw bars
+      ctx.fillStyle = '#FFFFFF'; // White bars like the example
+      
+      barsRef.current.forEach((h, i) => {
+        const currentHeight = minBarHeight + (maxBarHeight - minBarHeight) * h;
+        const x = startX + i * (barWidth + spacing);
+        const y = centerY - currentHeight / 2;
+        const radius = barWidth / 2;
+        
+        // Draw pill shape manually for compatibility (roundRect can crash some browsers)
+        ctx.beginPath();
+        ctx.moveTo(x + radius, y);
+        ctx.lineTo(x + barWidth - radius, y);
+        ctx.quadraticCurveTo(x + barWidth, y, x + barWidth, y + radius);
+        ctx.lineTo(x + barWidth, y + currentHeight - radius);
+        ctx.quadraticCurveTo(x + barWidth, y + currentHeight, x + barWidth - radius, y + currentHeight);
+        ctx.lineTo(x + radius, y + currentHeight);
+        ctx.quadraticCurveTo(x, y + currentHeight, x, y + currentHeight - radius);
+        ctx.lineTo(x, y + radius);
+        ctx.quadraticCurveTo(x, y, x + radius, y);
+        ctx.closePath();
+        ctx.fill();
       });
 
       requestRef.current = requestAnimationFrame(animate);
     };
 
     requestRef.current = requestAnimationFrame(animate);
-
     return () => cancelAnimationFrame(requestRef.current);
-  }, [isActive]);
+  }, [isActive, volume]);
 
   return (
-    <div className="w-full h-full bg-black/20 rounded-lg overflow-hidden relative">
-       {/* Background Glow Effect */}
-       {isActive && (
-         <div 
-           className="absolute inset-0 bg-blue-500/10 blur-xl transition-opacity duration-500" 
-           style={{ opacity: Math.min(1, volume * 2) }}
-         />
-       )}
+    <div className="w-full h-full flex items-center justify-center">
       <canvas
         ref={canvasRef}
         width={300}
         height={150}
-        className="w-full h-full relative z-10"
+        className="w-full h-full"
       />
     </div>
   );
