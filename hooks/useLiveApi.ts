@@ -11,16 +11,21 @@ export const useLiveApi = () => {
   const [status, setStatus] = useState<ConnectionStatus>('disconnected');
   const [messages, setMessages] = useState<Message[]>([]);
   const [isMuted, setIsMuted] = useState(false);
-  const [volumeLevel, setVolumeLevel] = useState(0); // For visualizer
+  const [volumeLevel, setVolumeLevel] = useState(0); 
 
   // Refs for audio context and processing
   const inputAudioContextRef = useRef<AudioContext | null>(null);
   const outputAudioContextRef = useRef<AudioContext | null>(null);
+  const outputAnalyserRef = useRef<AnalyserNode | null>(null);
+
   const streamRef = useRef<MediaStream | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  
   const nextStartTimeRef = useRef<number>(0);
   const sessionRef = useRef<Promise<any> | null>(null);
+  const rafIdRef = useRef<number | null>(null);
+  const currentInputVolumeRef = useRef<number>(0);
   
   // State buffer for transcriptions to handle partial updates
   const currentInputRef = useRef('');
@@ -43,9 +48,36 @@ export const useLiveApi = () => {
       });
       nextStartTimeRef.current = outputAudioContextRef.current.currentTime;
 
+      // Setup Output Analyser for Visualizer
+      const outputCtx = outputAudioContextRef.current;
+      outputAnalyserRef.current = outputCtx.createAnalyser();
+      outputAnalyserRef.current.fftSize = 256;
+      outputAnalyserRef.current.smoothingTimeConstant = 0.1;
+      outputAnalyserRef.current.connect(outputCtx.destination);
+
       // Get User Media
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
+
+      // Start Volume Monitoring Loop
+      const updateVolume = () => {
+        let outputVol = 0;
+        if (outputAnalyserRef.current) {
+           const dataArray = new Uint8Array(outputAnalyserRef.current.frequencyBinCount);
+           outputAnalyserRef.current.getByteFrequencyData(dataArray);
+           // Calculate average volume from frequency data
+           let sum = 0;
+           for(let i=0; i < dataArray.length; i++) sum += dataArray[i];
+           const avg = sum / dataArray.length;
+           outputVol = avg / 255; 
+        }
+        
+        const inputVol = currentInputVolumeRef.current;
+        setVolumeLevel(Math.max(outputVol, inputVol));
+        
+        rafIdRef.current = requestAnimationFrame(updateVolume);
+      };
+      updateVolume();
 
       // Connect to Gemini
       const sessionPromise = ai.live.connect({
@@ -78,15 +110,16 @@ export const useLiveApi = () => {
             const scriptProcessor = ctx.createScriptProcessor(4096, 1, 1);
             
             scriptProcessor.onaudioprocess = (e) => {
-              if (isMuted) return; // Don't send data if muted
-
               const inputData = e.inputBuffer.getChannelData(0);
               
-              // Calculate volume for visualizer
+              // Calculate input volume for visualizer
               let sum = 0;
               for(let i = 0; i < inputData.length; i++) sum += inputData[i] * inputData[i];
               const rms = Math.sqrt(sum / inputData.length);
-              setVolumeLevel(Math.min(1, rms * 5)); // boost factor
+              // Update ref for the animation loop
+              currentInputVolumeRef.current = isMuted ? 0 : Math.min(1, rms * 3);
+
+              if (isMuted) return; 
 
               const pcmBlob = createAudioBlob(inputData);
               
@@ -105,24 +138,21 @@ export const useLiveApi = () => {
           onmessage: async (msg: LiveServerMessage) => {
              // Handle Audio Output
              const audioData = msg.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
-             if (audioData && outputAudioContextRef.current) {
+             if (audioData && outputAudioContextRef.current && outputAnalyserRef.current) {
                const ctx = outputAudioContextRef.current;
                const buffer = await decodeAudioData(audioData, ctx, OUTPUT_SAMPLE_RATE);
                
                const source = ctx.createBufferSource();
                source.buffer = buffer;
-               source.connect(ctx.destination);
+               
+               // Connect source -> Analyser -> Destination
+               source.connect(outputAnalyserRef.current);
                
                // Schedule gapless playback
                const now = ctx.currentTime;
-               // Ensure we don't schedule in the past, but keep flow tight
                const startAt = Math.max(nextStartTimeRef.current, now);
                source.start(startAt);
                nextStartTimeRef.current = startAt + buffer.duration;
-               
-               // Visualizer update for output (simulated based on presence of audio)
-               setVolumeLevel(0.5 + Math.random() * 0.3); 
-               source.onended = () => setVolumeLevel(0);
              }
 
              // Handle Transcriptions
@@ -164,11 +194,13 @@ export const useLiveApi = () => {
             console.log('Session Closed');
             setStatus('disconnected');
             setVolumeLevel(0);
+            currentInputVolumeRef.current = 0;
           },
           onerror: (err) => {
             console.error('Session Error', err);
             setStatus('error');
             setVolumeLevel(0);
+            currentInputVolumeRef.current = 0;
             setMessages(prev => [...prev, {
               id: Date.now().toString(),
               role: 'system',
@@ -187,10 +219,16 @@ export const useLiveApi = () => {
   }, [isMuted, status]);
 
   const disconnect = useCallback(() => {
+    if (rafIdRef.current) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
+    setVolumeLevel(0);
+    currentInputVolumeRef.current = 0;
+
     if (sessionRef.current) {
       // Close the session
       sessionRef.current.then(session => {
-         // @ts-ignore - The SDK close method might vary, but we'll try standard close
          if(typeof session.close === 'function') session.close();
       });
       sessionRef.current = null;
@@ -209,6 +247,8 @@ export const useLiveApi = () => {
       outputAudioContextRef.current.close();
       outputAudioContextRef.current = null;
     }
+    outputAnalyserRef.current = null;
+
     if (processorRef.current) {
         processorRef.current.disconnect();
         processorRef.current = null;
