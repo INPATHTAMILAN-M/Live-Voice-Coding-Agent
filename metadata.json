@@ -1,0 +1,7 @@
+{
+  "name": "Copy of VS Code Voice Agent",
+  "description": "A VS Code-inspired coding assistant using Gemini 2.5 Live API for real-time voice interaction.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
